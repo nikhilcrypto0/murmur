@@ -20,4 +20,10 @@ audio path is being completed. Its manifest makes that limitation explicit and
 allows a native, Rust, TypeScript, or other implementation to be added later
 without changing host applications.
 
-See [CONTRIBUTING.md](../CONTRIBUTING.md) for the connector acceptance rules.
+[`examples/synthetic-tone`](examples/synthetic-tone) is a minimal, tested
+connector for a synthetic source. It shows the expected lifecycle, framing,
+timestamps, backpressure, cleanup, and error behavior without hardware.
+
+See the [connector authoring guide](../docs/connector-authoring.md) for how to
+build and validate a connector, and [CONTRIBUTING.md](../CONTRIBUTING.md) for the
+connector acceptance rules.

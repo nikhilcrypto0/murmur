@@ -1,0 +1,19 @@
+{
+  "$schema": "../../../spec/connector-manifest.schema.json",
+  "id": "dev.murmur.connector.example.synthetic-tone",
+  "name": "Synthetic tone (example)",
+  "version": "0.1.0",
+  "protocolMajor": 1,
+  "status": "experimental",
+  "transports": ["synthetic"],
+  "capabilities": ["discovery", "connection", "live-audio", "input-mute"],
+  "implementation": {
+    "language": "typescript",
+    "sdk": "@october-dev/murmur-protocol",
+    "path": "connectors/examples/synthetic-tone"
+  },
+  "platforms": ["linux", "macos", "windows"],
+  "licenses": {
+    "implementation": "Apache-2.0"
+  }
+}
