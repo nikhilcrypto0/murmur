@@ -20,9 +20,11 @@ audio path is being completed. Its manifest makes that limitation explicit and
 allows a native, Rust, TypeScript, or other implementation to be added later
 without changing host applications.
 
-[`examples/synthetic-tone`](examples/synthetic-tone) is a minimal, tested
-connector for a synthetic source. It shows the expected lifecycle, framing,
-timestamps, backpressure, cleanup, and error behavior without hardware.
+[`examples/synthetic-tone`](examples/synthetic-tone) is the manifest for a
+minimal, tested Dart connector for a synthetic source
+([implementation](../sdks/dart/murmur_protocol/example/synthetic_tone_connector.dart)).
+It shows the expected lifecycle, framing, timestamps, backpressure, cleanup, and
+error behavior without hardware.
 
 See the [connector authoring guide](../docs/connector-authoring.md) for how to
 build and validate a connector, and [CONTRIBUTING.md](../CONTRIBUTING.md) for the

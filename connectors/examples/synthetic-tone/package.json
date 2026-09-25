@@ -1,6 +1,0 @@
-{
-  "name": "murmur-connector-example-synthetic-tone",
-  "private": true,
-  "type": "module",
-  "description": "Minimal synthetic-audio example connector for the Murmur connector authoring guide."
-}

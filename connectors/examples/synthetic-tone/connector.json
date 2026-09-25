@@ -6,13 +6,13 @@
   "protocolMajor": 1,
   "status": "experimental",
   "transports": ["synthetic"],
-  "capabilities": ["discovery", "connection", "live-audio", "input-mute"],
+  "capabilities": ["discovery", "connection", "live-audio"],
   "implementation": {
-    "language": "typescript",
-    "sdk": "@october-dev/murmur-protocol",
-    "path": "connectors/examples/synthetic-tone"
+    "language": "dart",
+    "sdk": "murmur_protocol",
+    "path": "sdks/dart/murmur_protocol/example"
   },
-  "platforms": ["linux", "macos", "windows"],
+  "platforms": ["android", "ios", "linux", "macos", "windows"],
   "licenses": {
     "implementation": "Apache-2.0"
   }

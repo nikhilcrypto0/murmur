@@ -1,30 +1,33 @@
 # Connector authoring guide
 
-A connector adapts one family of voice sources to the `murmur.v1` protocol: an
-Omi wearable, a phone microphone, a headset, a network stream. This guide
-explains what a connector must do, how it should behave at the edges, and how
-to show a reviewer that it works. It applies to connectors written in any
-language, in-process or as a sidecar.
+A connector adapts one family of voice sources to Murmur: an Omi wearable, a
+phone microphone, a headset, a network stream. This guide explains what a
+connector must do, how it should behave at the edges, and how to show a reviewer
+that it works.
 
-Read [architecture.md](architecture.md) first for where connectors sit. The
-[connector checklist in CONTRIBUTING.md](../CONTRIBUTING.md#connector-pull-requests)
+Read [architecture.md](architecture.md) for where connectors sit, and
+[voice-runtime.md](voice-runtime.md) for the capture coordinator that drives
+them. The [connector checklist in CONTRIBUTING.md](../CONTRIBUTING.md#connector-pull-requests)
 lists what a connector pull request must document; this guide explains the
 expected behavior behind each item.
 
-The worked example is [`connectors/examples/synthetic-tone`](../connectors/examples/synthetic-tone).
-It is a complete, tested TypeScript connector for a synthetic sine-wave source,
-small enough to read in one sitting.
+In Dart, a connector implements the SDK's `VoiceConnector` and `VoiceSession`
+interfaces (`sdks/dart/murmur_protocol/lib/src/runtime.dart`). Other SDKs follow
+the same model as they gain runtime interfaces. The worked example is
+[`SyntheticToneConnector`](../sdks/dart/murmur_protocol/example/synthetic_tone_connector.dart),
+a complete, tested implementation for a synthetic sine-wave source.
 
 ## What a connector owns
 
-| Owns | Does not own |
+| Connector owns | Coordinator and host own |
 | --- | --- |
 | Discovering sources and reporting them as `VoiceSource` | Choosing a transcription or language provider |
-| Reporting permission and readiness state | Storing recordings, transcripts, or history |
-| Connect, start, mute, finalize, stop, disconnect, cleanup | Interpreting what the user said |
-| Parsing the source's codec and framing into `AudioFrame` | Product UI, prompts, or settings screens |
-| Declaring capabilities it actually implements | Retrying on behalf of the host indefinitely |
-| Actionable errors with stable codes | Provider- or product-specific assumptions |
+| Reporting permission and readiness state | Input muting, warm unmute, and finalization |
+| Connecting and opening one capture session | Endpointing and transcript assembly |
+| Starting capture, producing `AudioFrame`s, stopping, and cleanup | Storing recordings, transcripts, or history |
+| Parsing the source's codec and framing | Product UI, prompts, and settings |
+| Declaring capabilities it actually implements | Retrying on behalf of the user |
+| Actionable errors with stable codes | Interpreting what the user said |
 
 ## The manifest
 
@@ -42,52 +45,56 @@ what is planned.
 
 ## Lifecycle
 
-A source moves through discovery, connection, and one or more sessions. A
-session is one explicit capture, driven by `SessionControl` commands and
-reported with `RuntimeEvent`s.
-
 ```text
-discover ──▶ connect ──▶ start ──▶ LISTENING ◀──▶ WARM_MUTED
-                           │           │   (inputGate close/open)
-                           │           ▼
-                           │       FINALIZING ──▶ stop ──▶ STOPPED ──▶ disconnect
-                           └──────────────────────────────────────────▶ (cleanup)
+VoiceConnector                     VoiceSession
+--------------                     ------------
+discoverSources() ──▶ source
+connect(source) ──────────────────▶ idle ── start() ──▶ starting ──▶ listening
+                                                            │             │
+                                     stop() / close() ◀─────┴─────────────┘
+                                            │
+                                            ▼
+                                         stopped          (failure) ──▶ error
 ```
 
-- **Discover** is side-effect free and safe to repeat. Do not prompt for
-  permissions or open connections while enumerating.
-- **Connect** acquires the source (for example, a BLE link). A failure is an
-  error with a stable code, never a half-connected source.
-- **Start** reports `SESSION_STATE_STARTING`, then `captureReadiness` with
-  `live: true` once audio can actually flow, then `SESSION_STATE_LISTENING`.
-  Only one session per connected source unless the source genuinely supports
-  more.
-- **Input gate** closing moves to `SESSION_STATE_WARM_MUTED`: capture stops, the
-  session and the connection stay. Opening returns to `LISTENING`. Repeating the
-  current gate state changes nothing. With `flushAcceptedAudio`, audio already
-  handed to the host may still finalize.
-- **Finalize** stops new audio (`SESSION_STATE_FINALIZING`) so downstream
-  providers can finish; the session still needs `stop`.
-- **Stop** ends the session with `SESSION_STATE_STOPPED`.
-- **Disconnect** stops any active session first, then releases the source.
+- **Discover.** `discoverSources()` is a single-subscription stream that scans
+  until it is cancelled. Cancelling must stop the scan and release its
+  resources. Do not prompt for permissions or open connections while scanning.
+- **Connect.** `connect(source)` returns an **idle** session that is not
+  capturing. On failure it throws a `VoiceError` (for example `connect_failed`)
+  after releasing everything the attempt acquired; never return a half-connected
+  session.
+- **Start.** `start()` moves `idle → starting → listening`. `requestedFormat` is a
+  preference; expose the negotiated result through `format`. Starting a session
+  that is not idle throws `StateError`.
+- **Stop and close.** Both end the session and share **one** cleanup operation:
+  concurrent and repeated calls await the same future. Stopping is terminal; a new
+  capture needs a newly connected session.
+- **Failure.** A runtime failure sets `error` and then moves the session to
+  `error`, which is also terminal.
+- **Finalizing.** `SessionState.finalizing` is for a session that must finish
+  audio it already accepted before it stops. Muting and utterance finalization
+  are the coordinator's job ([voice-runtime.md](voice-runtime.md)), not the
+  connector's.
 
-Every event carries a session-scoped `sequence` that starts at 1 for each new
-session and strictly increases. Audio frames keep their own sequence, with the
-same rules.
+`stateChanges` is a broadcast stream with no replay: consumers subscribe first
+and then read `state`, tolerating one duplicate. Every getter stays readable after
+the session ends.
 
 ## Capabilities
 
 `VoiceSource.capabilities` tells the host what it may ask for. Declare a
 capability only when it works end to end on the documented platforms:
 
-- `SOURCE_CAPABILITY_LIVE_AUDIO`: streaming capture during a session.
-- `SOURCE_CAPABILITY_INPUT_MUTE`: the input gate works without tearing down the session.
-- `SOURCE_CAPABILITY_STORED_AUDIO`, `BATTERY`, `HARDWARE_CONTROL`,
-  `OUTPUT_AUDIO`, `BACKGROUND_CAPTURE`, `SPEAKER_VERIFICATION`: only with
-  documented behavior and tests.
+- `liveAudio`: streaming capture during a session.
+- `inputMute`: the source itself can mute its input without ending the session.
+  The coordinator's software gate works without it.
+- `storedAudio`, `battery`, `hardwareControl`, `outputAudio`,
+  `backgroundCapture`, `speakerVerification`: only with documented behavior and
+  tests.
 
-When the host asks for something undeclared, return an error with a stable code
-such as `unsupported-capability`. Do not silently ignore the request.
+When the host asks for something undeclared, fail with a stable code instead of
+silently ignoring the request.
 
 ## Discovery and permissions
 
@@ -95,87 +102,102 @@ such as `unsupported-capability`. Do not silently ignore the request.
   host can act on. The host, not the connector, decides when to prompt.
 - Keep `VoiceSource.metadata` non-sensitive. Raw device identifiers such as MAC
   addresses or serial numbers, credentials, signed URLs, and user speech are
-  forbidden. Use a stable, locally derived `sourceId` instead of a hardware
+  forbidden. Use a stable, locally derived source ID instead of a hardware
   address.
-- A source that disappears during discovery simply stops being listed. A source
+- A source that disappears during discovery simply stops being reported. A source
   that disappears during a session is an interruption (below).
 
 ## Audio format and framing
 
 - Every `AudioFrame.format` states `sampleRateHz`, `channels`, `encoding`, and
   `frameDurationMs`. Keep the format constant within a session.
-- If the host requests a format the source cannot produce, refuse with an error
-  such as `unsupported-format`. Do not silently deliver something else.
+- If the host requests a format the source cannot produce, fail `start` with a
+  code such as `format_unavailable`. Do not silently deliver something else.
   Resampling belongs in a clearly documented processing step, not hidden inside
   the transport.
 - For PCM, the payload length must match the format:
   `sampleRateHz × channels × bytesPerSample × frameDurationMs / 1000`. The
   conformance fixtures check this.
-- Decode source codecs (for example Opus or a vendor framing) inside the
+- Decode source codecs (for example Opus, LC3, or a vendor framing) inside the
   connector, and cite the protocol source you followed (see provenance below).
 
 ## Timestamps and ordering
 
-- `monotonic_time_us` comes from the producing host's monotonic clock. It is only
+- `monotonicTimeUs` comes from the producing host's monotonic clock. It is only
   comparable within one session on one machine. Never use wall-clock time.
-- Derive audio frame timestamps from the sample count since the session started,
-  not from when a packet arrived. Transport jitter then cannot make audio appear
-  to speed up or slow down. The example computes
+- Derive audio frame timestamps from the sample count since capture started, not
+  from when a packet arrived. Transport jitter then cannot make audio appear to
+  speed up or slow down. The example computes
   `start + samplesEmitted × 1e6 / sampleRate`.
-- Ordering uses `sequence`, never timestamps.
+- Frame `sequence` starts at 1 in each session and strictly increases. Ordering
+  uses `sequence`, never timestamps.
 
 ## Backpressure
 
-A connector must not buffer audio without limit when the host falls behind.
+`frames` is a single-subscription stream. A connector must not buffer audio
+without limit when the consumer is absent, paused, or slow.
 
-- **Prefer pull.** Produce a frame when the host asks for one. The example's
-  `nextFrame()` does this, so nothing can queue up.
-- If the transport pushes (BLE notifications, sockets), use a **bounded** queue.
-  When it is full, drop the oldest frames, keep sequences increasing so the gap
-  is visible, and report an error event with a code such as `audio-dropped` and
-  `retryable: true`.
-- Never block the transport's callback thread on a slow consumer.
+- Bound every pending frame, including events queued inside your stream
+  controller.
+- Document which frames are dropped when the buffer is full. Dropping the oldest
+  keeps the stream current; count the drops so they can be reported. The example
+  keeps at most eight frames and exposes `droppedFrames`.
+- Never block the transport's callback thread on a slow consumer, and never let
+  stream drainage delay cleanup.
 
 ## Interruption, cancellation, and cleanup
 
-- **Stop and disconnect are idempotent.** Calling them twice, or after the
-  source vanished, is not an error.
-- **Cancellation during startup.** A `stop` that arrives while starting must end
-  in `STOPPED` without later emitting `LISTENING` or frames.
-- **Source loss mid-session.** Emit an error event (`source-lost`, with
-  `retryable` set honestly), then `SESSION_STATE_STOPPED`, then release
-  resources. Do not reconnect in a tight loop. Reconnection is either
-  host-driven or bounded with backoff, and documented.
-- **After stop, nothing more.** No frames or events for a stopped session,
-  including late packets still in flight from the transport.
-- **Release everything** on disconnect: sockets, BLE subscriptions, audio
-  sessions, timers, and file handles. A leaked subscription after disconnect is
-  a bug.
+- **Cancellation during startup.** If `stop` or `close` wins against a pending
+  `start`, the start completes with a `VoiceError` whose code is `cancelled`, and
+  anything acquired late is released. The session must not reach `listening` or
+  emit frames afterwards.
+- **Source loss mid-session.** Set `error` with a code such as `device_lost` and
+  an honest `retryable`, move to `error`, and release resources. Do not reconnect
+  in a tight loop; reconnection is host-driven or bounded with backoff, and
+  documented.
+- **After termination, nothing more.** No frames or state changes for an ended
+  session, including late packets still in flight from the transport. The frame
+  stream completes.
+- **Release everything:** sockets, BLE subscriptions, audio sessions, timers, and
+  file handles. A leaked subscription after `close` is a bug.
 
 ## Errors
 
-Use the `MurmurError` shape: a stable, machine-readable `code`, a
-`message` that is safe to show but not stable API, and `retryable`. Messages
-must not contain speech, credentials, audio, or raw device identifiers. Document
-every code your connector can produce.
+Throw or record `VoiceError`: a stable, machine-readable `code` in `snake_case`,
+a `message` that is safe to show but is not stable API, and `retryable`. Reuse
+existing codes where they fit:
+
+| Code | When |
+| --- | --- |
+| `connect_failed` | `connect` could not open the source |
+| `start_failed` | `start` could not acquire capture resources |
+| `format_unavailable` | the requested format cannot be produced |
+| `cancelled` | `stop` or `close` won against a pending `start` |
+| `device_lost` | the source disappeared during a session |
+
+Messages must not contain speech, credentials, audio, or raw device identifiers.
+Document every code your connector can produce.
 
 ## Testing
 
 ### Automated tests (required)
 
 Build a fake or fixture for the transport so every test runs without hardware,
-as the example does. Cover at least:
+as the example does with an injectable frame clock and startup step. Cover at
+least:
 
-- discovery output parses as a valid `VoiceSource`;
-- start → `STARTING`, readiness, `LISTENING`, with increasing sequences;
-- frames: correct format, payload length, sample-derived timestamps, and
-  increasing sequences, deterministic for the same input;
-- input gate mute and resume;
-- finalize, stop, repeated stop, and disconnect with an active session;
-- cancellation during startup and source loss mid-session;
-- every error code;
-- every emitted `RuntimeEvent` and `AudioFrame` round-trips through your SDK's
-  parser. This is the cheapest proof that you emit valid `murmur.v1`.
+- discovery reports a valid `VoiceSource` and stops when cancelled;
+- `connect` returns an idle session, and fails with a stable code for a bad source;
+- `start` moves `starting → listening` and negotiates the format;
+- frames have the right format, payload length, sample-derived timestamps, and
+  increasing sequences, and are deterministic for the same input;
+- a refused format fails `start` and ends in `error`;
+- cancellation during startup (`cancelled`, never `listening`);
+- source loss mid-session (`device_lost`, frame stream completes);
+- the frame buffer is bounded and drops as documented;
+- `stop` and `close` share one cleanup and are terminal;
+- every emitted `AudioFrame` round-trips through the SDK's JSON model. This is
+  the cheapest proof that you emit valid `murmur.v1`.
 
 Use synthetic audio (tones, silence, generated noise). Never commit recordings,
 transcripts, or real device identifiers.
@@ -184,7 +206,7 @@ transcripts, or real device identifiers.
 
 - `make check-conformance` validates the shared fixtures and every connector
   manifest.
-- Run your SDK's surface (`make check-typescript`, `check-dart`, and so on).
+- Run your SDK's surface (`make check-dart`, `check-typescript`, and so on).
 - If your connector exposes new observable protocol behavior, add fixtures under
   `conformance/fixtures` and register them in `conformance/manifest.json`.
 
@@ -193,7 +215,8 @@ transcripts, or real device identifiers.
 Record, for each platform and device model you claim:
 
 1. device model, firmware, OS and version, host app build;
-2. discover, connect, start, 60 seconds of capture, mute and resume, stop, disconnect;
+2. discover, connect, start, 60 seconds of capture, stop, and a second connect and
+   capture;
 3. source removed or powered off mid-session: the observed error and cleanup;
 4. app backgrounded and restored, if background capture is claimed;
 5. audio sanity: format, frame cadence, and absence of gaps, checked on a
@@ -228,21 +251,15 @@ implications, so the direction can be agreed on before the work starts.
 
 ## The example connector
 
-[`connectors/examples/synthetic-tone`](../connectors/examples/synthetic-tone)
-shows the rules above in about 200 lines:
-
-- `connector.json`: an honest `experimental` manifest checked by
-  `make check-conformance`.
-- `connector.ts`: accepts `SessionControl`, emits `RuntimeEvent` and
-  `AudioFrame` with the TypeScript SDK models, and uses pull-based frames,
-  sample-derived timestamps, idempotent stop and disconnect, and stable error
-  codes.
-- `sdks/typescript/test/synthetic-tone-connector.test.ts`: the parts of the test
-  list above that apply to a synchronous synthetic source, run by
-  `make check-typescript`, with every emitted message round-tripped through the
-  SDK parser. Startup cancellation and source loss need an asynchronous
-  transport, so a real connector adds them.
-
-It works directly at the `murmur.v1` message level and is a teaching example,
-not a proposed runtime interface. Shared connector interfaces are tracked in
-[#34](https://github.com/october-dev/murmur/issues/34).
+- [`sdks/dart/murmur_protocol/example/synthetic_tone_connector.dart`](../sdks/dart/murmur_protocol/example/synthetic_tone_connector.dart)
+  implements `VoiceConnector` and `VoiceSession` for a synthetic sine tone:
+  - an idle session from `connect`;
+  - a cancellable start with an injectable startup step;
+  - PCM S16LE frames with sample-derived timestamps and an eight-frame drop-oldest
+    buffer;
+  - one shared cleanup for `stop` and `close`;
+  - `simulateDeviceLoss()` for the interruption path.
+- [`sdks/dart/murmur_protocol/test/synthetic_tone_connector_test.dart`](../sdks/dart/murmur_protocol/test/synthetic_tone_connector_test.dart)
+  covers the whole required test list above and runs with `make check-dart`.
+- [`connectors/examples/synthetic-tone/connector.json`](../connectors/examples/synthetic-tone/connector.json)
+  is its `experimental` manifest, checked by `make check-conformance`.
