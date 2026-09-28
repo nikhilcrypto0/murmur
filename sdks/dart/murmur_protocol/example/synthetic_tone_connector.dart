@@ -104,8 +104,10 @@ final class SyntheticToneSession implements VoiceSession {
 
   final SyntheticToneConnector _connector;
   final Queue<AudioFrame> _pending = Queue<AudioFrame>();
+  // Asynchronous delivery: a listener may call stop() or close() when it sees
+  // a transition without re-entering the transition that notified it.
   final StreamController<SessionState> _states =
-      StreamController<SessionState>.broadcast(sync: true);
+      StreamController<SessionState>.broadcast();
   late final StreamController<AudioFrame> _frames;
 
   @override

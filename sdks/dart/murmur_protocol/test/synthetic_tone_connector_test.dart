@@ -203,6 +203,32 @@ void main() {
     expect(() => session.start(), throwsStateError);
   });
 
+  for (final trigger in [SessionState.starting, SessionState.listening]) {
+    test('stop from a stateChanges listener on ${trigger.name} '
+        'releases the frame clock', () async {
+      var clockListened = false;
+      var clockCancelled = false;
+      final clock = StreamController<void>(
+        onListen: () => clockListened = true,
+        onCancel: () => clockCancelled = true,
+      );
+      final session = await SyntheticToneConnector(
+        frameClock: (_) => clock.stream,
+        clockUs: () => nowUs,
+      ).connect(SyntheticToneConnector.source);
+      session.stateChanges.listen((state) {
+        if (state == trigger) unawaited(session.stop());
+      });
+
+      await session.start().then((_) {}, onError: (_) {});
+      await pumpEventQueue();
+
+      expect(session.state, SessionState.stopped);
+      expect(!clockListened || clockCancelled, isTrue);
+      unawaited(clock.close());
+    });
+  }
+
   test('a failed acquisition ends the session with start_failed', () async {
     final session = await connector(
       acquire: () async => throw StateError('device busy'),
